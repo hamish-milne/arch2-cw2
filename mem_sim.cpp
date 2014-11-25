@@ -109,10 +109,7 @@ bool ensure_mem_capacity(cache* my_cache, uint32_t length)
 		block = my_cache->bytes_word * my_cache->words_block;
 		remainder = length % block;
 		if(remainder) length += (block - remainder);
-		if(my_cache->memory_space == NULL)
-			my_cache->memory_space = malloc(length);
-		else
-			my_cache->memory_space = realloc(my_cache->memory_space, length);
+		my_cache->memory_space = realloc(my_cache->memory_space, length);
 		if(my_cache->memory_space == NULL)
 		{
 			last_error = "Out of memory (main memory space)";
@@ -126,49 +123,105 @@ bool ensure_mem_capacity(cache* my_cache, uint32_t length)
 	return true;
 }
 
-bool read_memory(cache* my_cache, uint32_t addr, uint8_t* out)
+bool read_write_memory(cache* my_cache, uint32_t addr, uint8_t* data, bool write)
 {
-	uint32_t i, block;
+	uint32_t i, block, endblock;
 	if(!ensure_mem_capacity(my_cache, addr + 1))
 		return false;
 	/// Align to block
 	block = my_cache->bytes_word * my_cache->words_block;
+	endblock = addr + my_cache->bytes_word;
 	addr -= addr % block;
-	for(i = 0; i < block; i++)
-		out[i] = my_cache->memory_space[addr + i];
+	endblock -= endblock % block;
+	for(; addr <= endblock; addr += block)
+		for(i = 0; i < block; i++)
+			if(write)
+				my_cache->memory_space[addr + i] = data[i];
+			else
+				data[i] = my_cache->memory_space[addr + i];
 	return true;
 }
 
-bool read_addr(cache* my_cache, uint32_t addr, uint8_t* out, bool* hit)
+uint8_t* get_tmp_block(cache* my_cache)
 {
-	uint8_t* sets_start;
-	cache_item* items_start;
+	static uint8_t tmp = NULL;
+	static uint32_t length = 0;
+	uint32_t new_length = my_cache->bytes_word * my_cache->words_block * 2;
+	if(new_length > length)
+		tmp = realloc(tmp, new_length);
+	return tmp;
+}
+
+bool read_cache(cache* my_cache, uint32_t addr, uint8_t* out, uint32_t* time)
+{
+	uint8_t *sets_start, *tmp, *data;
+	cache_item *items_start, *lru_item;
+	uint64_t lru_timestamp;
 	/// Find all the offsets, index and tag
-	uint32_t byte_offset, word_offset, index, tag, i, row_size, lru_index;
+	uint32_t byte_offset, index, tag, i, row_size, lru_index;
 	tag = addr;
-	byte_offset = tag % my_cache->bytes_word;
+	byte_offset = tag % (my_cache->bytes_word * my_cache->words_block);
 	tag -= byte_offset;
-	word_offset = tag % my_cache->words_block;
-	tag -= word_offset;
+	//word_offset = tag % my_cache->words_block;
+	//tag -= word_offset;
 	index = tag % my_cache->blocks_set;
 	tag /= my_cache->bytes_word * my_cache->words_block * my_cache->blocks_set;
 
 	/// Now look in all the cache sets and see if it's valid
 	row_size = my_cache->words_block * my_cache->bytes_word;
 	items_start = my_cache->metadata + (index * my_cache->sets_cache);
-	sets_start = my_cache->cache_space + (index * my_cache->sets_cache * row_size);
+	data_start = my_cache->cache_space + (index * my_cache->sets_cache * row_size);
+	lru_index = my_cache->sets_cache;
+	lru_timestamp = -1;
 	for(i = 0; i < my_cache->sets_cache; i++)
-		if(sets_start[i].valid && sets_start[i].tag == tag)
-			break;
+	{
+		/// If it's invalid, we should use this set to store
+		if(!items_start[i].valid)
+		{
+			lru_index = i;
+			lru_timestamp = 0;
+		} else
+		{
+			/// Otherwise, it might contain the value we want, or maybe not
+			if(items_start[i].tag == tag)
+				break;
+			else if(items_start[i].timestamp < lru_timestamp)
+			{
+				lru_timestamp = items_start[i].timestamp;
+				lru_index = i;
+			}
+		}
+	}
 
 	if(i >= my_cache->sets_cache)
 	{
-		/// Miss!
+		/// Miss! Find a cache item to evict..
+		if(lru_index >= my_cache->sets_cache)
+		{
+			last_error = "Internal error (LRU item not found)";
+			return false;
+		}
+		lru_item = items_start + lru_index;
+		data = data_start + (lru_index * row_size);
+		/// We're doing write-back, so if the item is valid and dirty, write it back
+		if(lru_item->valid && lru_item->dirty)
+		{
+			if(!read_write_memory(my_cache,
+				lru_item->tag * my_cache->bytes_word * my_cache->words_block, data, true))
+				return false;
+			*time += my_cache->memory_write_time;
+		}
+		/// Now read from memory into the cache item
+		if(!read_write_memory(my_cache, addr, data, false))
+			return false;
+		*time += my_cache->memory_read_time;
+		i = lru_index;
 	}
-	else
-	{
-		/// Hit!
-	}
+
+	/// Hit! Copy a single word to the output
+	*time += my_cache->hit_time;
+
+
 }
 
 static bool read_req(cache* my_cache, char* line)
