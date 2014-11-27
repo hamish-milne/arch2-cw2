@@ -1,0 +1,7 @@
+# depslib dependency file v1.0
+1417105446 source:c:\users\administrator\documents\github\arch2-cw2\mem_sim.cpp
+	<stdio.h>
+	<stdlib.h>
+	<stdint.h>
+	<ctype.h>
+
