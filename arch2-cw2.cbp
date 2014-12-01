@@ -37,7 +37,6 @@
 			<Add option="-Wall" />
 		</Compiler>
 		<Unit filename="mem_sim.cpp" />
-		<Unit filename="mem_sim.h" />
 		<Extensions>
 			<code_completion />
 			<envvars />

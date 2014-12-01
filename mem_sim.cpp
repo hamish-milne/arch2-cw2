@@ -3,13 +3,16 @@
 #include <stdint.h>
 #include <ctype.h>
 
-#define N_COMMANDS 5
 #define MAX_SIZE 0x800000
-#define NUM_PARAMS 8
+#define BUF_SIZE 1024
+
 #define WARNING "# Warning: "
 #define ERROR "# Error: "
 #define INFO "# Info: "
-#define BUF_SIZE 1024
+
+#define NUM_COMMANDS 5
+#define NUM_PARAMS 8
+
 #define S (char*)
 #define U8 (uint8_t*)
 
@@ -21,33 +24,51 @@ typedef enum
 } bool;
 #endif // __cplusplus
 
+/**
+ * All the data required to manage a single cache block
+ **/
 typedef struct
 {
-	bool valid, dirty;
-	uint32_t tag;
-	uint64_t timestamp;
+	bool valid, dirty;		/// Valid and dirty flags
+	uint32_t tag;			/// The upper address bits
+	uint64_t timestamp;		/// The time this block was last accessed
 } cache_item;
 
+/**
+ * All the data associated with the simulated cache
+ **/
 typedef struct
 {
-	uint8_t* memory_space;
-	uint8_t* cache_space;
-	cache_item* metadata;
-	uint32_t memory_size;
-	uint32_t address_bits;
-	uint32_t bytes_word;
-	uint32_t words_block;
-	uint32_t blocks_set;
-	uint32_t sets_cache;
-	uint32_t hit_time;
-	uint32_t memory_read_time;
-	uint32_t memory_write_time;
+	uint8_t* memory_space;	/// The main memory data
+	uint8_t* cache_space;	/// The cache data
+	cache_item* metadata;	/// The cache meta-data
+	uint32_t memory_size;	/// The current amount of allocated main memory
+	uint32_t address_bits;	/// The number of address bits
+	uint32_t bytes_word;	/// The number of bytes in a word
+	uint32_t words_block;	/// The number of words in a block
+	uint32_t blocks_set;	/// The number of blocks in a cache set
+	uint32_t sets_cache;	/// The number of cache sets (associativity)
+	uint32_t hit_time;		/// The time taken for a cache hit
+	uint32_t memory_read_time;		/// The time for a memory read
+	uint32_t memory_write_time;		/// The time for a memory write
 } cache;
 
-typedef bool (*command)(cache* my_cache, char* line, uint64_t timestamp);
+/**
+ * The required signature for an input command
+ * Returns true for success, false for failure
+ **/
+typedef bool (*command)(cache* my_cache,		/// The cache object
+                        char* line,				/// The input line
+                        uint64_t timestamp);	/// The current timestamp
 
+/**
+ * The last reported error, or NULL for no error
+ **/
 static char* last_error = NULL;
 
+/**
+ * Tests whether two strings are equal
+ **/
 bool streq(const char* a, const char* b)
 {
 	while(*a || *b)
@@ -56,6 +77,9 @@ bool streq(const char* a, const char* b)
 	return true;
 }
 
+/**
+ * Prints and resets the last error
+ **/
 void print_error()
 {
 	if(last_error != NULL)
@@ -63,11 +87,19 @@ void print_error()
 	last_error = NULL;
 }
 
+/**
+ * Prints the given warning
+ **/
 void print_warning(const char* warning)
 {
 	printf(WARNING "%s\n", warning);
 }
 
+/**
+ * Sets up the given cache using its fixed input parameters
+ * (address_bits, bytes_word, words_block, blocks_set, sets_cache)
+ * Returns true for success, false for failure
+ **/
 static bool create_cache(cache* my_cache)
 {
 	if(my_cache->address_bits > 32)
@@ -102,6 +134,10 @@ static bool create_cache(cache* my_cache)
 	return true;
 }
 
+/**
+ * Reallocates the main memory (if necessary) to ensure it has 'length' bytes
+ * Returns true on success, false on failure
+ **/
 bool ensure_mem_capacity(cache* my_cache, uint32_t length)
 {
 	uint32_t i;
@@ -125,7 +161,16 @@ bool ensure_mem_capacity(cache* my_cache, uint32_t length)
 	return true;
 }
 
-bool read_write_memory(cache* my_cache, uint32_t addr, uint8_t* data, bool write, uint32_t* time)
+/**
+ * Reads or writes from main memory
+ * Returns true on success, false on failure
+ * 'my_cache', 'data' and 'time' cannot be null
+ **/
+bool read_write_memory(cache* my_cache,	/// The cache object
+                       uint32_t addr,	/// The block-aligned address
+                       uint8_t* data,	/// The data to read/write to
+                       bool write,		/// Whether we are writing
+                       uint32_t* time)	/// Where to write the time taken
 {
 	uint32_t i, block;
 	/// Check block align
@@ -146,20 +191,36 @@ bool read_write_memory(cache* my_cache, uint32_t addr, uint8_t* data, bool write
 	return true;
 }
 
-uint8_t* get_tmp_block(cache* my_cache)
+/**
+ * Gets a temporary buffer that is at least twice the size of a block
+ **/
+static uint8_t* get_tmp_block(cache* my_cache)
 {
 	static uint8_t* tmp = NULL;
 	static uint32_t length = 0;
 	uint32_t new_length = my_cache->bytes_word * my_cache->words_block * 2;
 	if(new_length > length)
 		tmp = U8 realloc(tmp, new_length);
-	/// If no buffer, just exit now. Rare enough that there's no need for an error
+	/// If no buffer, just exit now.
+	/// Rare enough that there's no need for an error
 	if(!tmp)
 		exit(-1);
 	return tmp;
 }
 
-bool read_write_cache(cache* my_cache, uint32_t addr, uint8_t* out, uint32_t* time, uint64_t timestamp, uint32_t* set_index, bool write)
+/**
+ * Reads or writes to the cache, passing it to the main memory if needed
+ * Returns true on success, false on failure
+ * 'my_cache', 'out', 'time', and 'hit' cannot be null
+ **/
+bool read_write_cache(cache* my_cache,		/// Cache object
+                      uint32_t addr,		/// Block-aligned address
+                      uint8_t* out,			/// Data input/output
+                      uint32_t* time,		/// Memory time taken
+                      uint64_t timestamp,	/// Current time
+                      uint32_t* set_index,	/// Set index output (or NULL)
+                      bool* hit,			/// Hit output
+                      bool write)			/// Whether we are writing
 {
 	uint8_t *data, *data_start;
 	cache_item *items_start, *lru_item;
@@ -187,8 +248,12 @@ bool read_write_cache(cache* my_cache, uint32_t addr, uint8_t* out, uint32_t* ti
 		/// If it's invalid, we should use this set to store
 		if(!items_start[i].valid)
 		{
-			lru_index = i;
-			lru_timestamp = 0;
+			/// If we've found a blank space already, don't swap
+			if(lru_timestamp)
+			{
+				lru_index = i;
+				lru_timestamp = 0;
+			}
 		} else
 		{
 			/// Otherwise, it might contain the value we want, or maybe not
@@ -204,6 +269,7 @@ bool read_write_cache(cache* my_cache, uint32_t addr, uint8_t* out, uint32_t* ti
 
 	if(i >= my_cache->sets_cache)
 	{
+		*hit = false;
 		/// Miss! Find a cache item to evict..
 		if(lru_index >= my_cache->sets_cache)
 		{
@@ -212,11 +278,12 @@ bool read_write_cache(cache* my_cache, uint32_t addr, uint8_t* out, uint32_t* ti
 		}
 		lru_item = items_start + lru_index;
 		data = data_start + (lru_index * block);
-		/// We're doing write-back, so if the item is valid and dirty, write it back
+		/// We're doing write-back, so write back if the item is dirty
 		if(lru_item->valid && lru_item->dirty)
 		{
 			if(!read_write_memory(my_cache,
-				(lru_item->tag*my_cache->blocks_set + lru_index) * block, data, true, time))
+				(lru_item->tag*my_cache->blocks_set + lru_index)
+									* block, data, true, time))
 				return false;
 		}
 		/// Now read from memory into the cache item
@@ -228,11 +295,11 @@ bool read_write_cache(cache* my_cache, uint32_t addr, uint8_t* out, uint32_t* ti
 		lru_item->tag = tag;
 	} else
 	{
+		*hit &= true;
 		lru_index = i;
 	}
 
 	/// Hit! Copy a single word either way
-	*time += my_cache->hit_time;
 	data = data_start + (lru_index * block);
 	if(set_index)
 		*set_index = lru_index;
@@ -252,7 +319,12 @@ bool read_write_cache(cache* my_cache, uint32_t addr, uint8_t* out, uint32_t* ti
 	return true;
 }
 
-static void check_excess_params(char* line, const char* request)
+/**
+ * Checks whether the given string pointer has printable data
+ * A warning is outputted if it does
+ **/
+static void check_excess_params(char* line,				/// Pointer to the line
+								const char* request)	/// Type of request
 {
 	while(*line && isspace(*line))
 		line++;
@@ -260,7 +332,14 @@ static void check_excess_params(char* line, const char* request)
 		printf(WARNING "Excess parameters for %s request", request);
 }
 
-static bool read_write_req(cache* my_cache, char* line, uint64_t timestamp, bool write)
+/**
+ * Performs a read or write request
+ * Returns true on success, false on failure
+ **/
+static bool read_write_req(cache* my_cache,		/// Cache object
+                           char* line,			/// Text input
+                           uint64_t timestamp,	/// Current time
+                           bool write)			/// Whether we are writing
 {
 	static uint8_t* read_buf = NULL;
 	static uint32_t read_buf_len = 0;
@@ -270,7 +349,7 @@ static bool read_write_req(cache* my_cache, char* line, uint64_t timestamp, bool
 	char *endptr, *test;
 	char data_buf[3];
 	uint32_t block, block_offset, block_addr;
-	uint32_t time, time2, i, set_index, bytes_read;
+	uint32_t time, i, set_index, bytes_read;
 	uint8_t *buf;
 	int64_t addr = strtoll(line, &endptr, 0);
 
@@ -285,6 +364,7 @@ static bool read_write_req(cache* my_cache, char* line, uint64_t timestamp, bool
 		return false;
 	}
 
+	block = my_cache->words_block * my_cache->bytes_word;
 	sscanf(endptr, " %n", &whitespace);
 	line = endptr + whitespace;
 	/// If writing, read the address from the input
@@ -337,33 +417,43 @@ static bool read_write_req(cache* my_cache, char* line, uint64_t timestamp, bool
 			}
 			bytes_read++;
 		}
+		if(bytes_read > block)
+		{
+			last_error = S"Data length greater than block size";
+			return false;
+		}
 		if(bytes_read != my_cache->bytes_word)
-			printf(WARNING "Unaligned data; %d bytes in a word, %d read\n", my_cache->bytes_word, bytes_read);
+			printf(WARNING "Unaligned data; %d bytes in a word, %d read\n",
+					my_cache->bytes_word, bytes_read);
 	} else
 	{
 		if(*line)
 			print_warning("Excess parameters for read request");
 	}
 
-	block = my_cache->words_block * my_cache->bytes_word;
 	block_offset = addr % block;
 	block_addr = addr - block_offset;
 	buf = get_tmp_block(my_cache);
-	time = 0;
-	if(!read_write_cache(my_cache, block_addr, buf, &time, timestamp, &set_index, false))
-		return false;
-
+	time = my_cache->hit_time;
+	set_index = -1;
+	hit = true;
 	two_blocks = ((block_offset + my_cache->bytes_word) > block);
-	/// If it's a multi-block read, we'll just have to use the index from the first one
-	hit = time <= my_cache->hit_time;
-	if(two_blocks)
+
+	/// We need to read first if: we're not writing, the data size
+	/// isn't one block, or the address is not block aligned
+	if(block_offset || (bytes_read != block) || !write)
 	{
-		time2 = 0;
-		if(!read_write_cache(my_cache, block_addr + block, buf + block, &time2, timestamp, NULL, false))
+		if(!read_write_cache(my_cache, block_addr, buf, &time,
+							timestamp, &set_index, &hit, false))
 			return false;
-		hit &= time2 <= my_cache->hit_time;
-		time += time2;
-		printf(INFO "Multi-block command (address near block end)\n");
+		/// If it's a multi-block read, use the set_index from the first one
+		if(two_blocks)
+		{
+			if(!read_write_cache(my_cache, block_addr + block, buf + block,
+									&time, timestamp, NULL, &hit, false))
+				return false;
+			printf(INFO "Multi-block command (address near block end)\n");
+		}
 	}
 
 	/// If we're writing, we need to modify the block, then write it back
@@ -371,15 +461,21 @@ static bool read_write_req(cache* my_cache, char* line, uint64_t timestamp, bool
 	{
 		for(i = 0; i < bytes_read; i++)
 			buf[block_offset + i] = read_buf[i];
-		/// We don't need to check for a hit; if there was a miss, it will have already been picked up by the read
-		if(!read_write_cache(my_cache, block_addr, buf, &time, timestamp, NULL, true))
+		/// We don't need to check for a hit; if there was a miss,
+		/// it will have already been picked up by the read
+		if(!read_write_cache(my_cache, block_addr, buf, &time, timestamp,
+							set_index == (unsigned)-1 ? &set_index : NULL,
+							&hit, true))
 			return false;
-		if(two_blocks && !read_write_cache(my_cache, block_addr + block, buf + block, &time, timestamp, NULL, true))
+		if(two_blocks && !read_write_cache(my_cache, block_addr + block,
+											buf + block, &time, timestamp,
+											NULL, &hit, true))
 			return false;
 	}
 
 	/// Print the output
-	printf("%s-ack %d %s %d ", write ? "write" : "read", set_index, hit ? "hit" : "miss", time);
+	printf("%s-ack %d %s %d ", write ? "write" : "read",
+			set_index, hit ? "hit" : "miss", time);
 	if(!write)
 	{
 		buf += block_offset - 1;
@@ -390,16 +486,25 @@ static bool read_write_req(cache* my_cache, char* line, uint64_t timestamp, bool
 	return true;
 }
 
+/**
+ * Performs a read request ('command' signature)
+ **/
 static bool read_req(cache* my_cache, char* line, uint64_t timestamp)
 {
 	return read_write_req(my_cache, line, timestamp, false);
 }
 
+/**
+ * Performs a write request ('command' signature)
+ **/
 static bool write_req(cache* my_cache, char* line, uint64_t timestamp)
 {
 	return read_write_req(my_cache, line, timestamp, true);
 }
 
+/**
+ * Flushes the cache ('command' signature)
+ **/
 static bool flush_req(cache* my_cache, char* line, uint64_t timestamp)
 {
 	uint32_t i, j, block = my_cache->bytes_word * my_cache->words_block;
@@ -414,7 +519,8 @@ static bool flush_req(cache* my_cache, char* line, uint64_t timestamp)
 		time += my_cache->hit_time;
 		if(md->valid && md->dirty)
 		{
-			addr = ((md->tag * my_cache->blocks_set) + (i / my_cache->sets_cache)) * block;
+			addr = ((md->tag * my_cache->blocks_set) +
+					(i / my_cache->sets_cache)) * block;
 			if(!ensure_mem_capacity(my_cache, addr + block))
 				return false;
 			time += my_cache->memory_write_time;
@@ -428,6 +534,9 @@ static bool flush_req(cache* my_cache, char* line, uint64_t timestamp)
 	return true;
 }
 
+/**
+ * Outputs debug information ('command' signature)
+ **/
 static bool debug_req(cache* my_cache, char* line, uint64_t timestamp)
 {
 	uint32_t i, j, block = my_cache->bytes_word * my_cache->words_block;
@@ -437,27 +546,34 @@ static bool debug_req(cache* my_cache, char* line, uint64_t timestamp)
 	check_excess_params(line, "debug");
 
 	printf("debug-ack-begin\n"
-		   "| Index | Valid | Dirty | Tag        | Data\n"
-		   "+-------+-------+-------+------------+------\n");
+		   "| Index | Valid | Dirty | Tag        | Timestamp  | Data\n"
+		   "+-------+-------+-------+------------+------------+------\n");
 	for(i = 0; i < n_items; i++, md++)
 	{
-		printf("| %-5d | %-5d | %-5d | %-10d | ", (i / my_cache->sets_cache), md->valid, md->dirty, md->tag);
+		printf("| %5d | %5d | %5d | %10d | %10d | ", (i / my_cache->sets_cache),
+				md->valid, md->dirty, md->tag, (uint32_t)md->timestamp);
 		for(j = 0; j < block; j++, data++)
-			printf("%02X%s", *data, ((j + 1) % my_cache->bytes_word) ? "" : " ");
+			printf("%02X%s",*data, ((j + 1) % my_cache->bytes_word) ? "" : " ");
 		printf("\n");
 	}
 	printf("debug-ack-end\n");
 	return true;
 }
 
+/**
+ * No action ('command' signature)
+ **/
 static bool comment(cache* my_cache, char* line, uint64_t timestamp)
 {
 	return true;
 }
 
+/**
+ * The list of possible commands; name and function
+ **/
 static const
 struct { const char* name; command cmd; }
-commands[N_COMMANDS] =
+commands[NUM_COMMANDS] =
 {
 	{ "#", &comment },
 	{ "read-req", &read_req },
@@ -466,6 +582,9 @@ commands[N_COMMANDS] =
 	{ "debug-req", &debug_req }
 };
 
+/**
+ * The list of default parameters; name and value
+ **/
 static const
 struct { const char* name; uint32_t value; }
 default_values[NUM_PARAMS] =
@@ -480,6 +599,9 @@ default_values[NUM_PARAMS] =
 	{ "Memory write time", 2 }	/// Memory write time
 };
 
+/**
+ * Entry point
+ **/
 int main(int argc, char* argv[])
 {
 	cache my_cache;
@@ -495,7 +617,8 @@ int main(int argc, char* argv[])
 	{
 		if(i+1 >= argc)
 		{
-			printf(WARNING "%s unset; assuming %d\n", default_values[i].name, default_values[i].value);
+			printf(WARNING "%s unset; assuming %d\n", default_values[i].name,
+					default_values[i].value);
 			*(start_params + i) = default_values[i].value;
 		}
 		else
@@ -503,7 +626,8 @@ int main(int argc, char* argv[])
 			tmp = strtol(argv[i + 1], NULL, 0);
 			if(!tmp || tmp < 0)
 			{
-				printf(ERROR "%s is invalid; assuming %d\n", default_values[i].name, default_values[i].value);
+				printf(ERROR "%s is invalid; assuming %d\n",
+						default_values[i].name, default_values[i].value);
 				*(start_params + i) = default_values[i].value;
 			}
 			else
@@ -523,7 +647,7 @@ int main(int argc, char* argv[])
 			if(sscanf(buffer, " %s %n", cmd_buf, &tmp) < 1)
 				continue;
 			cmd = NULL;
-			for(i = 0; i < N_COMMANDS; i++)
+			for(i = 0; i < NUM_COMMANDS; i++)
 			{
 				if(streq(cmd_buf, commands[i].name))
 				{
