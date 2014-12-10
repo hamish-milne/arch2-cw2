@@ -163,6 +163,7 @@ bool ensure_mem_capacity(cache* my_cache, uint32_t length)
 
 /**
  * Reads or writes from main memory
+ * Only deals with a whole block
  * Returns true on success, false on failure
  * 'my_cache', 'data' and 'time' cannot be null
  **/
@@ -210,6 +211,7 @@ static uint8_t* get_tmp_block(cache* my_cache)
 
 /**
  * Reads or writes to the cache, passing it to the main memory if needed
+ * Only deals with a whole block
  * Returns true on success, false on failure
  * 'my_cache', 'out', 'time', and 'hit' cannot be null
  **/
@@ -218,7 +220,7 @@ bool read_write_cache(cache* my_cache,		/// Cache object
                       uint8_t* out,			/// Data input/output
                       uint32_t* time,		/// Memory time taken
                       uint64_t timestamp,	/// Current time
-                      uint32_t* set_index,	/// Set index output (or NULL)
+                      int32_t* set_index,	/// Set index output (or NULL)
                       bool* hit,			/// Hit output
                       bool write)			/// Whether we are writing
 {
@@ -286,8 +288,8 @@ bool read_write_cache(cache* my_cache,		/// Cache object
 									* block, data, true, time))
 				return false;
 		}
-		/// Now read from memory into the cache item
-		if(!read_write_memory(my_cache, addr, data, false, time))
+		/// Now read from memory into the cache item, unless we're writing
+		if(!write && !read_write_memory(my_cache, addr, data, false, time))
 			return false;
 		/// This is taken from memory, so we know it's clean (and valid)
 		lru_item->dirty = false;
@@ -348,8 +350,9 @@ static bool read_write_req(cache* my_cache,		/// Cache object
 	bool hit, two_blocks;
 	char *endptr, *test;
 	char data_buf[3];
-	uint32_t block, block_offset, block_addr;
-	uint32_t time, i, set_index, bytes_read;
+	int32_t block_offset, set_index;
+	uint32_t block, block_addr;
+	uint32_t time, i, bytes_read;
 	uint8_t *buf;
 	int64_t addr = strtoll(line, &endptr, 0);
 
@@ -464,7 +467,7 @@ static bool read_write_req(cache* my_cache,		/// Cache object
 		/// We don't need to check for a hit; if there was a miss,
 		/// it will have already been picked up by the read
 		if(!read_write_cache(my_cache, block_addr, buf, &time, timestamp,
-							set_index == (unsigned)-1 ? &set_index : NULL,
+							(set_index < 0) ? &set_index : NULL,
 							&hit, true))
 			return false;
 		if(two_blocks && !read_write_cache(my_cache, block_addr + block,
